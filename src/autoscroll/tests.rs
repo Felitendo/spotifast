@@ -13,7 +13,11 @@ struct Fixture {
     rows: Vec<Rect>,
     buttons: Vec<Rect>,
     inputs: Vec<Rect>,
+    draggable: Vec<Rect>,
+    sliders: Vec<Rect>,
+    popup: bool,
     text: String,
+    value: f32,
     tag_lyrics: bool,
     following: bool,
 }
@@ -37,7 +41,11 @@ impl Fixture {
             rows: Vec::new(),
             buttons: Vec::new(),
             inputs: Vec::new(),
+            draggable: Vec::new(),
+            sliders: Vec::new(),
+            popup: false,
             text: String::new(),
+            value: 0.5,
             tag_lyrics: false,
             following: true,
         };
@@ -53,6 +61,8 @@ impl Fixture {
         self.rows.clear();
         self.buttons.clear();
         self.inputs.clear();
+        self.draggable.clear();
+        self.sliders.clear();
         let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(560.0, 340.0))),
@@ -102,6 +112,15 @@ impl Fixture {
                                 egui::TextEdit::singleline(&mut self.text).desired_width(200.0),
                             );
                             self.inputs.push(input.rect);
+                            let draggable = ui.add_sized(
+                                [220.0, 30.0],
+                                egui::Label::new("Dragged with the primary button")
+                                    .sense(egui::Sense::click_and_drag()),
+                            );
+                            row(ui, &draggable);
+                            self.draggable.push(draggable.rect);
+                            let slider = ui.add(egui::Slider::new(&mut self.value, 0.0..=1.0));
+                            self.sliders.push(slider.rect);
                             if self.tall {
                                 ui.allocate_space(egui::vec2(220.0, 700.0));
                             }
@@ -111,6 +130,14 @@ impl Fixture {
                         lyrics(&child, output.id);
                     }
                     self.areas.push((output.id, output.inner_rect));
+                }
+                if self.popup {
+                    egui::Area::new(Id::new("popup"))
+                        .order(egui::Order::Foreground)
+                        .fixed_pos(egui::pos2(20.0, 60.0))
+                        .show(&ctx, |ui| {
+                            ui.allocate_space(egui::vec2(150.0, 120.0));
+                        });
                 }
                 let outcome = self.controller.finish(&ctx, self.enabled);
                 if outcome.stop_following_lyrics {
@@ -175,19 +202,32 @@ fn scrolling_stays_with_the_starting_list_when_the_pointer_crosses_another_pane(
 }
 
 #[test]
-fn only_a_scrollable_background_or_list_row_can_arm() {
+fn a_press_anywhere_in_a_list_arms_except_on_text_fields_sliders_and_popups() {
+    for target in 0..3 {
+        let mut f = Fixture::new();
+        let position = match target {
+            0 => f.rows[0].center(),
+            1 => f.buttons[0].center(),
+            _ => f.draggable[0].center(),
+        };
+        f.middle(position);
+        assert!(
+            f.controller.active(),
+            "row, button or row drag {target} arms"
+        );
+    }
     for target in 0..4 {
         let mut f = Fixture::new();
         let position = match target {
-            0 => f.buttons[0].center(),
-            1 => f.inputs[0].center(),
+            0 => f.inputs[0].center(),
+            1 => f.sliders[0].center(),
             2 => egui::pos2(100.0, 290.0),
             _ => egui::pos2(500.0, 320.0),
         };
         f.middle(position);
         assert!(
             !f.controller.active(),
-            "control, input or chrome {target} must not arm"
+            "text field, slider or chrome {target} must not arm"
         );
         assert!(f.offsets().iter().all(|offset| *offset == Vec2::ZERO));
     }
@@ -196,6 +236,15 @@ fn only_a_scrollable_background_or_list_row_can_arm() {
     assert!(
         f.controller.active(),
         "blank space inside an overflowing list is eligible"
+    );
+    let mut f = Fixture::new();
+    f.popup = true;
+    f.frame(vec![], true);
+    f.frame(vec![], true);
+    f.middle(egui::pos2(60.0, 100.0));
+    assert!(
+        !f.controller.active(),
+        "a popup keeps the list beneath it still"
     );
     let mut f = Fixture::new();
     f.tall = false;
@@ -485,7 +534,7 @@ fn extra_redraws_do_not_make_the_same_one_second_gesture_scroll_further() {
 }
 
 #[test]
-fn releasing_a_held_middle_button_after_dragging_stops_but_a_plain_click_keeps_scrolling() {
+fn releasing_a_held_middle_button_after_moving_stops_but_a_plain_click_keeps_scrolling() {
     let mut f = Fixture::new();
     let anchor = f.rows[0].center();
     f.frame(
@@ -506,13 +555,13 @@ fn releasing_a_held_middle_button_after_dragging_stops_but_a_plain_click_keeps_s
         vec![button(below, egui::PointerButton::Middle, false)],
         true,
     );
-    assert!(!f.controller.active(), "releasing after a drag ends it");
+    assert!(!f.controller.active(), "releasing after moving ends it");
     for _ in 0..5 {
         f.frame(vec![egui::Event::PointerMoved(below)], true);
     }
     assert_eq!(f.offsets()[0], held);
 
-    // A press and release inside the dead zone is a click: the list keeps
+    // Released inside the dead zone, the press was a click: the list keeps
     // following the pointer until the next click.
     let mut f = Fixture::new();
     let anchor = f.rows[0].center();
@@ -542,11 +591,10 @@ fn releasing_a_held_middle_button_after_dragging_stops_but_a_plain_click_keeps_s
 }
 
 #[test]
-fn speed_follows_elapsed_time_and_grows_with_the_pointer_distance() {
+fn speed_follows_chromium_and_the_time_that_actually_passed() {
     // Without an immediate repaint request egui reports a predicted frame
     // time, not the real one. Thirty frames a second must still scroll as far
-    // per second as sixty, and twice the distance past the dead zone twice as
-    // fast.
+    // per second as sixty.
     let distance = |rate: u32, pointer: f32| {
         let mut f = Fixture::at_rate(f64::from(rate));
         let anchor = f.rows[0].center();
@@ -560,30 +608,28 @@ fn speed_follows_elapsed_time_and_grows_with_the_pointer_distance() {
         }
         f.offsets()[0].y - start
     };
-    let near = distance(30, DEAD_ZONE + 20.0);
-    assert!(
-        (near - 20.0 * SPEED).abs() < 20.0 * SPEED * 0.1,
-        "one second at 20 points past the dead zone: {near}"
-    );
-    assert!((distance(60, DEAD_ZONE + 20.0) - near).abs() < 20.0 * SPEED * 0.1);
-    let far = distance(30, DEAD_ZONE + 40.0);
-    assert!(
-        (far / near - 2.0).abs() < 0.1,
-        "twice as far must scroll twice as fast: {near} vs {far}"
-    );
+    // Chromium scrolls 0.04 * distance ^ 2.2 points a second.
+    for pointer in [40.0_f32, 60.0] {
+        let expected = 0.04 * pointer.powf(2.2);
+        for rate in [30, 60] {
+            let scrolled = distance(rate, pointer);
+            assert!(
+                (scrolled - expected).abs() < expected * 0.05,
+                "{pointer} points away at {rate} Hz: {scrolled} instead of {expected}"
+            );
+        }
+    }
+    assert_eq!(distance(60, DEAD_ZONE), 0.0);
 }
 
 #[test]
-fn the_cursor_shows_the_scrollable_axes_and_then_the_direction() {
+fn the_cursor_matches_chromium() {
     use egui::CursorIcon::*;
     let both = egui::vec2(100.0, 100.0);
     let vertical = egui::vec2(0.0, 100.0);
-    let horizontal = egui::vec2(100.0, 0.0);
     assert_eq!(cursor(Vec2::ZERO, both), AllScroll);
-    assert_eq!(cursor(Vec2::ZERO, vertical), ResizeVertical);
-    assert_eq!(cursor(egui::vec2(0.0, 5.0), vertical), ResizeVertical);
-    assert_eq!(cursor(Vec2::ZERO, horizontal), ResizeHorizontal);
-    for (distance, icon) in [
+    assert_eq!(cursor(Vec2::ZERO, vertical), AllScroll);
+    for (velocity, icon) in [
         (egui::vec2(0.0, -40.0), ResizeNorth),
         (egui::vec2(0.0, 40.0), ResizeSouth),
         (egui::vec2(40.0, 0.0), ResizeEast),
@@ -592,8 +638,10 @@ fn the_cursor_shows_the_scrollable_axes_and_then_the_direction() {
         (egui::vec2(-30.0, 30.0), ResizeSouthWest),
         (egui::vec2(30.0, 30.0), ResizeSouthEast),
         (egui::vec2(-30.0, -30.0), ResizeNorthWest),
-        (egui::vec2(5.0, 40.0), ResizeSouth),
     ] {
-        assert_eq!(cursor(distance, both), icon, "{distance:?}");
+        assert_eq!(cursor(velocity, both), icon, "{velocity:?}");
     }
+    // A list that only scrolls vertically shows only vertical arrows.
+    assert_eq!(cursor(egui::vec2(30.0, -30.0), vertical), ResizeNorth);
+    assert_eq!(cursor(egui::vec2(30.0, 0.0), vertical), AllScroll);
 }
