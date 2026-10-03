@@ -9,6 +9,8 @@ use egui::{Context, Id, LayerId, Pos2, Rect, Response, ScrollArea, Ui, Vec2, Vie
 const FRAME_ID: &str = "spotifast-autoscroll-frame";
 const DEAD_ZONE: f32 = 12.0;
 const SPEED: f32 = 6.0;
+/// The longest step one frame may take, so a stalled frame cannot jump.
+const MAX_STEP: f64 = 0.1;
 
 #[derive(Clone, Copy, Default)]
 struct Input {
@@ -16,8 +18,9 @@ struct Input {
     focused: bool,
     pointer: Option<Pos2>,
     middle: bool,
+    released: bool,
     cancel: bool,
-    dt: f32,
+    time: f64,
 }
 
 impl Input {
@@ -28,13 +31,14 @@ impl Input {
             focused: input.focused,
             pointer: input.pointer.hover_pos(),
             middle: input.pointer.button_pressed(egui::PointerButton::Middle),
+            released: input.pointer.button_released(egui::PointerButton::Middle),
             cancel: input.pointer.any_pressed()
                 || input.key_pressed(egui::Key::Escape)
                 || input
                     .events
                     .iter()
                     .any(|event| matches!(event, egui::Event::MouseWheel { .. })),
-            dt: input.stable_dt.clamp(0.0, 0.05),
+            time: input.time,
         })
     }
 }
@@ -72,12 +76,28 @@ struct Observations {
     candidates: Vec<Candidate>,
 }
 
+impl Observations {
+    fn released(&self) -> bool {
+        self.root.released || self.areas.iter().any(|area| area.input.released)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Active {
     id: Id,
     viewport: ViewportId,
     anchor: Pos2,
     offset: Vec2,
+    /// The previous frame's time. egui's `stable_dt` is only a frame-rate
+    /// prediction when nothing asked for an immediate repaint, which is the
+    /// usual case here, so the elapsed time is measured instead.
+    time: f64,
+    /// The middle button is still down from the press that armed the gesture.
+    held: bool,
+    /// The pointer left the dead zone while the button was held. Releasing it
+    /// then ends the gesture; releasing a plain click keeps scrolling until
+    /// the next click.
+    dragged: bool,
 }
 
 #[derive(Default)]
@@ -151,6 +171,7 @@ impl Autoscroll {
             return Outcome::default();
         };
         let owned = self.active() || self.cancelled;
+        let released = frame.released();
         if !enabled || self.cancelled {
             self.active = None;
             return Outcome {
@@ -173,20 +194,29 @@ impl Autoscroll {
                 self.active = None;
                 return Outcome::owned();
             }
+            let distance = owner
+                .input
+                .pointer
+                .map(|pointer| axis_distance(pointer - active.anchor, owner.max));
+            if active.held {
+                active.dragged |= distance.is_some_and(|distance| distance.length() > DEAD_ZONE);
+                if released {
+                    if active.dragged {
+                        self.active = None;
+                        return Outcome::owned();
+                    }
+                    active.held = false;
+                }
+            }
             let mut outcome = Outcome::owned();
-            if let Some(pointer) = owner.input.pointer {
-                let mut distance = pointer - active.anchor;
-                if owner.max.x <= 0.0 {
-                    distance.x = 0.0;
-                }
-                if owner.max.y <= 0.0 {
-                    distance.y = 0.0;
-                }
+            let dt = (owner.input.time - active.time).clamp(0.0, MAX_STEP) as f32;
+            active.time = owner.input.time;
+            if let Some(distance) = distance {
                 let length = distance.length();
                 let delta = if length <= DEAD_ZONE {
                     Vec2::ZERO
                 } else {
-                    distance / length * (length - DEAD_ZONE) * SPEED * owner.input.dt
+                    distance / length * (length - DEAD_ZONE) * SPEED * dt
                 };
                 let offset = (active.offset + delta).clamp(Vec2::ZERO, owner.max);
                 let mut state = owner.state;
@@ -205,7 +235,7 @@ impl Autoscroll {
                 }
                 active.offset = offset;
                 if owner.input.viewport == ctx.viewport_id() {
-                    ctx.set_cursor_icon(egui::CursorIcon::AllScroll);
+                    ctx.set_cursor_icon(cursor(distance, owner.max));
                 }
             }
             self.active = Some(active);
@@ -226,8 +256,11 @@ impl Autoscroll {
                     viewport: candidate.viewport,
                     anchor: candidate.position,
                     offset: owner.state.offset,
+                    time: owner.input.time,
+                    held: !released,
+                    dragged: false,
                 });
-                ctx.set_cursor_icon(egui::CursorIcon::AllScroll);
+                ctx.set_cursor_icon(cursor(Vec2::ZERO, owner.max));
                 return Outcome {
                     scrolling: true,
                     stop_following_lyrics: matches!(owner.kind, Kind::Lyrics),
@@ -236,6 +269,43 @@ impl Autoscroll {
             }
         }
         Outcome::default()
+    }
+}
+
+/// The pointer's offset from the anchor along the axes the area can scroll.
+fn axis_distance(mut distance: Vec2, max: Vec2) -> Vec2 {
+    if max.x <= 0.0 {
+        distance.x = 0.0;
+    }
+    if max.y <= 0.0 {
+        distance.y = 0.0;
+    }
+    distance
+}
+
+/// Inside the dead zone the cursor shows the axes the area can scroll;
+/// outside it, the direction the list is moving.
+fn cursor(distance: Vec2, max: Vec2) -> egui::CursorIcon {
+    use egui::CursorIcon::*;
+    if distance.length() <= DEAD_ZONE {
+        return match (max.x > 0.0, max.y > 0.0) {
+            (true, false) => ResizeHorizontal,
+            (false, true) => ResizeVertical,
+            _ => AllScroll,
+        };
+    }
+    // Eight sectors of 45 degrees, starting east and turning clockwise in
+    // screen coordinates, where y grows downwards.
+    let sector = (distance.y.atan2(distance.x) / std::f32::consts::FRAC_PI_4).round() as i32;
+    match sector.rem_euclid(8) {
+        0 => ResizeEast,
+        1 => ResizeSouthEast,
+        2 => ResizeSouth,
+        3 => ResizeSouthWest,
+        4 => ResizeWest,
+        5 => ResizeNorthWest,
+        6 => ResizeNorth,
+        _ => ResizeNorthEast,
     }
 }
 

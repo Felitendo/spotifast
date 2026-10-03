@@ -9,9 +9,13 @@ nav_order: 3
 
 On Windows, since 0.8.0, and on Linux once turned on, middle-click a scrolling
 list or its empty background, then move the pointer away from the starting
-point. That list follows the pointer, faster as the distance grows. Moving across another pane keeps the original list in control.
+point. That list follows the pointer, faster as the distance grows, and the
+pointer shows the direction it is scrolling. Moving across another pane keeps
+the original list in control.
 A small dead zone prevents an ordinary middle-click from moving the view.
-Click again, press Esc, turn the wheel, or switch to another window to stop.
+You can also hold the middle button while moving and release it to stop.
+Otherwise click again, press Esc, turn the wheel, or switch to another window
+to stop.
 Buttons and text fields keep their normal middle-click behavior.
 
 This works automatically on Windows, with no setting to enable. On Linux, turn

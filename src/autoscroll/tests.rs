@@ -483,3 +483,117 @@ fn extra_redraws_do_not_make_the_same_one_second_gesture_scroll_further() {
         "equal time and pointer distance must give equal scrolling: {ordinary} vs {frequent}"
     );
 }
+
+#[test]
+fn releasing_a_held_middle_button_after_dragging_stops_but_a_plain_click_keeps_scrolling() {
+    let mut f = Fixture::new();
+    let anchor = f.rows[0].center();
+    f.frame(
+        vec![
+            egui::Event::PointerMoved(anchor),
+            button(anchor, egui::PointerButton::Middle, true),
+        ],
+        true,
+    );
+    assert!(f.controller.active());
+    let below = anchor + egui::vec2(0.0, 60.0);
+    for _ in 0..10 {
+        f.frame(vec![egui::Event::PointerMoved(below)], true);
+    }
+    let held = f.offsets()[0];
+    assert!(held.y > 0.0, "holding the button scrolls");
+    f.frame(
+        vec![button(below, egui::PointerButton::Middle, false)],
+        true,
+    );
+    assert!(!f.controller.active(), "releasing after a drag ends it");
+    for _ in 0..5 {
+        f.frame(vec![egui::Event::PointerMoved(below)], true);
+    }
+    assert_eq!(f.offsets()[0], held);
+
+    // A press and release inside the dead zone is a click: the list keeps
+    // following the pointer until the next click.
+    let mut f = Fixture::new();
+    let anchor = f.rows[0].center();
+    f.frame(
+        vec![
+            egui::Event::PointerMoved(anchor),
+            button(anchor, egui::PointerButton::Middle, true),
+        ],
+        true,
+    );
+    f.frame(
+        vec![
+            egui::Event::PointerMoved(anchor + egui::vec2(0.0, 5.0)),
+            button(anchor, egui::PointerButton::Middle, false),
+        ],
+        true,
+    );
+    assert!(f.controller.active());
+    for _ in 0..10 {
+        f.frame(
+            vec![egui::Event::PointerMoved(anchor + egui::vec2(0.0, 60.0))],
+            true,
+        );
+    }
+    assert!(f.controller.active());
+    assert!(f.offsets()[0].y > 0.0);
+}
+
+#[test]
+fn speed_follows_elapsed_time_and_grows_with_the_pointer_distance() {
+    // Without an immediate repaint request egui reports a predicted frame
+    // time, not the real one. Thirty frames a second must still scroll as far
+    // per second as sixty, and twice the distance past the dead zone twice as
+    // fast.
+    let distance = |rate: u32, pointer: f32| {
+        let mut f = Fixture::at_rate(f64::from(rate));
+        let anchor = f.rows[0].center();
+        f.middle(anchor);
+        let start = f.offsets()[0].y;
+        for _ in 0..rate {
+            f.frame(
+                vec![egui::Event::PointerMoved(anchor + egui::vec2(0.0, pointer))],
+                true,
+            );
+        }
+        f.offsets()[0].y - start
+    };
+    let near = distance(30, DEAD_ZONE + 20.0);
+    assert!(
+        (near - 20.0 * SPEED).abs() < 20.0 * SPEED * 0.1,
+        "one second at 20 points past the dead zone: {near}"
+    );
+    assert!((distance(60, DEAD_ZONE + 20.0) - near).abs() < 20.0 * SPEED * 0.1);
+    let far = distance(30, DEAD_ZONE + 40.0);
+    assert!(
+        (far / near - 2.0).abs() < 0.1,
+        "twice as far must scroll twice as fast: {near} vs {far}"
+    );
+}
+
+#[test]
+fn the_cursor_shows_the_scrollable_axes_and_then_the_direction() {
+    use egui::CursorIcon::*;
+    let both = egui::vec2(100.0, 100.0);
+    let vertical = egui::vec2(0.0, 100.0);
+    let horizontal = egui::vec2(100.0, 0.0);
+    assert_eq!(cursor(Vec2::ZERO, both), AllScroll);
+    assert_eq!(cursor(Vec2::ZERO, vertical), ResizeVertical);
+    assert_eq!(cursor(egui::vec2(0.0, 5.0), vertical), ResizeVertical);
+    assert_eq!(cursor(Vec2::ZERO, horizontal), ResizeHorizontal);
+    for (distance, icon) in [
+        (egui::vec2(0.0, -40.0), ResizeNorth),
+        (egui::vec2(0.0, 40.0), ResizeSouth),
+        (egui::vec2(40.0, 0.0), ResizeEast),
+        (egui::vec2(-40.0, 0.0), ResizeWest),
+        (egui::vec2(30.0, -30.0), ResizeNorthEast),
+        (egui::vec2(-30.0, 30.0), ResizeSouthWest),
+        (egui::vec2(30.0, 30.0), ResizeSouthEast),
+        (egui::vec2(-30.0, -30.0), ResizeNorthWest),
+        (egui::vec2(5.0, 40.0), ResizeSouth),
+    ] {
+        assert_eq!(cursor(distance, both), icon, "{distance:?}");
+    }
+}
